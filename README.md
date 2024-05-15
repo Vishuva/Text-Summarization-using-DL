@@ -1,0 +1,91 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.layers import Input, LSTM, Embedding, Dense, Concatenate, TimeDistributed
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from sklearn.model_selection import train_test_split
+
+# For handling text and cleaning
+import re
+import nltk
+nltk.download('stopwords')
+from nltk.corpus import stopwords
+
+# Load dataset (example: a dataset with columns 'text' and 'summary')
+data = pd.read_csv('news_summary.csv')
+
+# Basic text cleaning function
+def clean_text(text):
+    text = text.lower()
+    text = re.sub(r'\s+', ' ', text)  # Remove multiple spaces
+    text = re.sub(r'\W', ' ', text)  # Remove special characters
+    text = re.sub(r'\d', ' ', text)  # Remove digits
+    text = ' '.join([word for word in text.split() if word not in stopwords.words('english')])
+    return text
+
+# Apply text cleaning
+data['cleaned_text'] = data['text'].apply(clean_text)
+data['cleaned_summary'] = data['summary'].apply(clean_text)
+
+# Prepare input and output sequences
+max_text_len = 100
+max_summary_len = 10
+
+tokenizer_text = Tokenizer()
+tokenizer_text.fit_on_texts(data['cleaned_text'])
+text_seq = tokenizer_text.texts_to_sequences(data['cleaned_text'])
+text_seq = pad_sequences(text_seq, maxlen=max_text_len, padding='post')
+
+tokenizer_summary = Tokenizer()
+tokenizer_summary.fit_on_texts(data['cleaned_summary'])
+summary_seq = tokenizer_summary.texts_to_sequences(data['cleaned_summary'])
+summary_seq = pad_sequences(summary_seq, maxlen=max_summary_len, padding='post')
+
+# Split data into training and validation sets
+X_train, X_val, y_train, y_val = train_test_split(text_seq, summary_seq, test_size=0.2, random_state=42)
+
+# Define the model
+latent_dim = 300
+embedding_dim = 100
+
+# Encoder
+encoder_inputs = Input(shape=(max_text_len,))
+enc_emb = Embedding(input_dim=len(tokenizer_text.word_index)+1, output_dim=embedding_dim)(encoder_inputs)
+encoder_lstm = LSTM(latent_dim, return_state=True)
+encoder_outputs, state_h, state_c = encoder_lstm(enc_emb)
+encoder_states = [state_h, state_c]
+
+# Decoder
+decoder_inputs = Input(shape=(max_summary_len,))
+dec_emb_layer = Embedding(input_dim=len(tokenizer_summary.word_index)+1, output_dim=embedding_dim)
+dec_emb = dec_emb_layer(decoder_inputs)
+decoder_lstm = LSTM(latent_dim, return_sequences=True, return_state=True)
+decoder_outputs, _, _ = decoder_lstm(dec_emb, initial_state=encoder_states)
+decoder_dense = TimeDistributed(Dense(len(tokenizer_summary.word_index)+1, activation='softmax'))
+decoder_outputs = decoder_dense(decoder_outputs)
+
+# Define the model
+model = Model([encoder_inputs, decoder_inputs], decoder_outputs)
+model.compile(optimizer=Adam(), loss='sparse_categorical_crossentropy')
+model.summary()
+
+# Train the model
+history = model.fit([X_train, y_train[:,:-1]], y_train.reshape(y_train.shape[0], y_train.shape[1], 1)[:,1:],
+                    epochs=10, batch_size=64, validation_data=([X_val, y_val[:,:-1]], y_val.reshape(y_val.shape[0], y_val.shape[1], 1)[:,1:]))
+
+# Function to convert sequence to text
+def seq2text(sequence, tokenizer):
+    reverse_word_map = dict(map(reversed, tokenizer.word_index.items()))
+    return ' '.join([reverse_word_map.get(i, '') for i in sequence])
+
+# Predict and evaluate on the validation set
+for i in range(5):
+    print("Original Text:", seq2text(X_val[i], tokenizer_text))
+    print("Original Summary:", seq2text(y_val[i], tokenizer_summary))
+    prediction = model.predict([X_val[i].reshape(1, max_text_len), y_val[i][:max_summary_len-1].reshape(1, max_summary_len-1)])
+    predicted_summary = np.argmax(prediction, axis=-1)
+    print("Predicted Summary:", seq2text(predicted_summary[0], tokenizer_summary))
+    print("\n")
